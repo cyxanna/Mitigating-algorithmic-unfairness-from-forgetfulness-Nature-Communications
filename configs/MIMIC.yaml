@@ -1,0 +1,57 @@
+# dataset
+dataset_name: "MIMIC"
+data_root: "data"
+extra_eval_datasets: null
+protected_attr: "ethnicity"
+task_type: "mortality"
+
+# model
+model_name: "lstm"
+device: "cuda"
+
+lstm:
+  hidden_dim: 256
+
+# training for the original model
+seed: 512
+lr: 0.0005
+epochs: 30
+batch_size: 512
+early_stop_patience: 10
+
+# unlearning method
+unlearning_method: "FU"
+
+# FU hyperparams
+unlearning_lr: 0.0005
+unlearning_iterations: 1
+weight_cls: 0.1
+weight_fair: 0.3
+weight_remain: 0.1
+
+# unlearning
+exp_root: ""
+num_runs: 1
+target_step: -1  # -1 means run all steps
+sample_method: "random"
+remove_ratio: 0.1
+step_ratio: 0.01
+target_protected_values: null
+
+# evaluation
+eval_fairness: 1
+eval_mia: 1
+eval_model_inversion: 1
+
+# mia hyperparameters
+mia_kwargs:
+    sample_test_size: 500
+
+# model inversion hyperparameters
+model_inversion_kwargs:
+    iters: 100
+    noise_std_range: [0.05, 0.1]
+    l1_reg: 1e-3
+    k: 10
+    multi_restart: 1
+    inv_per_class: 256
