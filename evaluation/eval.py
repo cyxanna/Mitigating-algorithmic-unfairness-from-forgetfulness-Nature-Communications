@@ -56,7 +56,8 @@ def evaluate_prob_preds(
         y_true,
         y_pred_prob,
         y_protected_dict=None,
-        best_threshold_fn=cutoff_youdens_j):
+        best_threshold_fn=cutoff_youdens_j,
+        threshold_override=None):
     """
     Evaluate the probability predictions
     Args:
@@ -66,12 +67,15 @@ def evaluate_prob_preds(
             if None, will not evaluate fairness
             each key should be the sensitive attribute's name, e.g. 'gender', 'ethnicity' etc.
             each value should be an 1D array-like labels of sensitive attributes
+        threshold_override: if provided, use this threshold instead of computing from y_true/y_pred_prob
     Returns:
         A dict of evaluation results
     """
     y_pred_prob, y_true = np.array(y_pred_prob).flatten(), np.array(y_true).flatten()
-    # best_threshold = compute_best_threshold(true=y_true, pred=y_pred_prob)
-    best_threshold = best_threshold_fn(true=y_true, pred=y_pred_prob)
+    if threshold_override is not None:
+        best_threshold = threshold_override
+    else:
+        best_threshold = best_threshold_fn(true=y_true, pred=y_pred_prob)
     y_pred_class = (y_pred_prob >= best_threshold).astype(int)
 
 
@@ -90,36 +94,43 @@ def evaluate_prob_preds(
 
 
 
-def evaluate_cls_fairness(model, test_dataset, device, eval_fairness, protected_attr):
-
-    eval_dataset_tds = TensorDataset(test_dataset["test_input"], test_dataset["test_label"].squeeze())
-    loader = DataLoader(eval_dataset_tds, batch_size=512, shuffle=False)
+def _forward_collect(model, dataset, device):
+    """Forward pass through a dataset and collect predicted probabilities and loss."""
+    tds = TensorDataset(dataset["test_input"], dataset["test_label"].squeeze())
+    loader = DataLoader(tds, batch_size=512, shuffle=False)
+    loss_fn = torch.nn.BCELoss()
 
     model.eval()
-    loss_fn = torch.nn.BCELoss()
     y_preds_prob = []
-    val_loss = 0 if (loss_fn is not None) else None
+    total_loss = 0.0
     with torch.no_grad():
         for inputs, labels in loader:
             inputs = inputs.to(device)
             labels = labels.to(device)
-
             outputs = model(inputs)
             if isinstance(outputs, dict):
                 outputs = outputs['preds']
-            else:
-                outputs = outputs
-            if loss_fn is not None:
-                this_loss = loss_fn(outputs[:, 0], labels)
-                val_loss = val_loss + this_loss.item()
-                
+            total_loss += loss_fn(outputs[:, 0], labels).item()
             y_preds_prob.extend(outputs.cpu().numpy())
 
-    if loss_fn is not None:
-        val_loss = val_loss / len(loader)
-
+    total_loss /= len(loader)
     y_preds_prob = np.asarray(y_preds_prob).flatten()
-    
+    return y_preds_prob, total_loss
+
+
+def evaluate_cls_fairness(model, test_dataset, device, eval_fairness, protected_attr, val_dataset=None):
+
+    # Forward pass on test set
+    y_preds_prob, val_loss = _forward_collect(model, test_dataset, device)
+
+    # Determine threshold: use val_dataset if provided, otherwise fall back to test set
+    if val_dataset is not None:
+        val_preds_prob, _ = _forward_collect(model, val_dataset, device)
+        val_labels = val_dataset["test_label"].detach().cpu().numpy().flatten()
+        best_threshold = cutoff_youdens_j(true=val_labels, pred=val_preds_prob)
+    else:
+        best_threshold = None  # will be computed on test set inside evaluate_prob_preds
+
     labels = test_dataset["test_label"].detach().cpu().numpy()
 
     if eval_fairness:
@@ -133,6 +144,7 @@ def evaluate_cls_fairness(model, test_dataset, device, eval_fairness, protected_
         y_true=labels,
         y_pred_prob=y_preds_prob,
         y_protected_dict=protected_attr_dict,
+        threshold_override=best_threshold,
     )
     eval_res['best_threshold'] = float(best_threshold)
 
@@ -389,7 +401,7 @@ def inversion_knn_distance_by_label(
     return {"per_class": per_class, "overall": overall}
 
 
-def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, removed_dataset=None):
+def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, removed_dataset=None, val_datasets=None):
 
     """
     Evaluate model on test datasets.
@@ -400,7 +412,8 @@ def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, remove
         exp_dir: Directory to save results
         config: Arguments
         step (int, optional): Current unlearning step (batch index) for filename.
-        removed_data (tuple, optional): Tuple of (X_remove, y_remove) for MIA evaluation.
+        removed_dataset (tuple, optional): Tuple of (X_remove, y_remove) for MIA evaluation.
+        val_datasets (dict, optional): Dictionary of validation datasets for threshold selection.
     
     """
     results = {}
@@ -409,10 +422,12 @@ def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, remove
     removed_data, removed_label = removed_dataset
 
     for ds_name, test_dataset_dict in test_datasets.items():
+        val_ds = val_datasets.get(ds_name, None) if val_datasets else None
 
         # --- cls and fairness evaluation --- 
         results[ds_name], _, preds[ds_name] = evaluate_cls_fairness(
-            model, test_dataset_dict, config.device, config.eval_fairness, config.protected_attr)
+            model, test_dataset_dict, config.device, config.eval_fairness, config.protected_attr,
+            val_dataset=val_ds)
         
         step_log_prefix = f"Step {step}" if step is not None else "Initial"
         print(f"{step_log_prefix}, {ds_name} AU-ROC: {results[ds_name]['au-roc']:.4f}")
@@ -424,7 +439,7 @@ def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, remove
         # --- MIA evaluation --- 
         if config.eval_mia and removed_data is not None:
             test_data, test_label = test_dataset_dict["test_input"], test_dataset_dict["test_label"]
-            mia_res = evaluate_mia(model, removed_data, test_data, removed_label, test_label, config.device, sample_test_size=config.mia_kwargs.get('sample_test_size', None))
+            mia_res = evaluate_mia(model, removed_data, test_data, removed_label, test_label, config.device, seed=config.mia_kwargs.get('seed', 1234), sample_test_size=config.mia_kwargs.get('sample_test_size', None))
             results[ds_name]['mia_res'] = mia_res
             print(f"{step_log_prefix}, {ds_name} MIA AUC: {mia_res:.4f}")
         
@@ -436,7 +451,7 @@ def evaluate_unlearning(model, test_datasets, exp_dir, config, step=None, remove
             else:
                 label_counts = {0: test_label.shape[0], 1: test_label.shape[0]}
 
-            model_inversion_res = inversion_knn_distance_by_label(model, removed_data, removed_label, config.device, label_counts, **config.model_inversion_kwargs)
+            model_inversion_res = inversion_knn_distance_by_label(model, removed_data, removed_label, config.device, label_counts, seed=config.model_inversion_kwargs.get('seed', 1234), **config.model_inversion_kwargs)
             results[ds_name]['model_inversion_res'] = model_inversion_res
             print(f"{step_log_prefix}, {ds_name} Model Inversion KNN L2 distance: {model_inversion_res['overall']['d_knn_forget_mean']:.4f}")
 

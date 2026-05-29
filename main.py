@@ -72,7 +72,7 @@ def load_model_weights(model: torch.nn.Module, model_path: str, device: str):
     model.load_state_dict(state)
     return model
 
-def ensure_step0_origin(config, train_dataset, all_test_datasets, train_data):
+def ensure_step0_origin(config, train_dataset, all_val_datasets, all_test_datasets, train_data):
     base_dir = os.path.join(config.exp_root.strip(), f"{config.dataset_name}_{config.model_name}_{config.protected_attr}_{config.task_type}")
     step0_dir = os.path.join(base_dir, "step_0")
     os.makedirs(step0_dir, exist_ok=True)
@@ -104,7 +104,7 @@ def ensure_step0_origin(config, train_dataset, all_test_datasets, train_data):
             shuffle=True
         )
 
-        val_dataset = all_test_datasets[config.dataset_name]
+        val_dataset = all_val_datasets[config.dataset_name]
 
         model = create_model(config, train_data, config.seed)
         loss_fn = nn.BCELoss()
@@ -129,6 +129,7 @@ def ensure_step0_origin(config, train_dataset, all_test_datasets, train_data):
                 config=config,
                 step=0,
                 removed_dataset=(None, None),
+                val_datasets=all_val_datasets,
             )
         except Exception as e:
             print(f"[step_0] Evaluate failed: {e}")
@@ -146,7 +147,7 @@ def list_parent_dirs_for_step(base_dir: str, step: int) -> List[str]:
     parent_dirs = []
     for name in os.listdir(prev_step_dir):
         path = os.path.join(prev_step_dir, name)
-        if os.path.isdir(path) and name.startswith("run_seed_"):
+        if os.path.isdir(path) and name.startswith("seed_"):
             parent_dirs.append(path)
     parent_dirs.sort()
     return parent_dirs
@@ -169,11 +170,12 @@ def read_removed_indices_for_prev(parent_dir: str, prev_step: int) -> np.ndarray
         return np.array([], dtype=int)
     return np.load(path)
 
-def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset, all_test_datasets, step_remove_size: int, *, method_key: str):
+def run_single(config, step: int, parent_dir: str, train_dataset, all_val_datasets, all_test_datasets, step_remove_size: int, *, method_key: str):
+
     base_dir = os.path.join(config.exp_root.strip(), f"{config.dataset_name}_{config.model_name}_{config.protected_attr}_{config.task_type}")
     step_dir = os.path.join(base_dir, f"step_{step}")
     os.makedirs(step_dir, exist_ok=True)
-    run_dir = os.path.join(step_dir, f"run_seed_{run_seed}")
+    run_dir = os.path.join(step_dir, f"seed_{config.unlearning_seed}")
 
     if os.path.exists(run_dir):
         print(f"[warn] {run_dir} already exists. Skip this run to avoid overwrite.")
@@ -192,7 +194,7 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
         raise FileNotFoundError(f"Parent remaining indices not found: {parent_remaining_path}")
     remaining_indices_prev = np.load(parent_remaining_path)
 
-    set_seed(run_seed)
+    set_seed(config.unlearning_seed)
 
     removed_indices_t, remaining_indices_t = sample_removed_from_remaining(
         remaining_indices=remaining_indices_prev,
@@ -200,7 +202,7 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
         protected_attr_data=prot_train,
         step_remove_size=step_remove_size,
         sample_method=getattr(config, 'sample_method', 'random'),
-        seed=run_seed,
+        seed=config.unlearning_seed,
         target_protected_values=config.target_protected_values,
         label_sampling="stratified",
     )
@@ -212,7 +214,7 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
         batch_size=config.batch_size,
     )
 
-    model = create_model(config, X_train, run_seed)
+    model = create_model(config, X_train, config.unlearning_seed)
     if step == 1:
         parent_model_path = os.path.join(os.path.join(config.exp_root.strip(), f"{config.dataset_name}_{config.model_name}_{config.protected_attr}_{config.task_type}"), "step_0", "origin_model.pt")
     else:
@@ -221,7 +223,7 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
         raise FileNotFoundError(f"Parent model not found: {parent_model_path}")
     load_model_weights(model, parent_model_path, config.device)
 
-    print(f"[step {step}] run_seed={run_seed}: unlearning with method={method_key}...")
+    print(f"[step {step}] unlearning_seed={config.unlearning_seed}: unlearning with method={method_key}...")
 
     loss_fn = nn.BCELoss()
     stats = fair_unlearning(
@@ -239,7 +241,7 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
 
     meta = {
         "step": step,
-        "seed": run_seed,
+        "unlearning_seed": config.unlearning_seed,
         "parent_dir": parent_dir,
         "timestamp": datetime.datetime.now().isoformat(),
         "unlearning_stats": stats
@@ -258,9 +260,10 @@ def run_single(config, step: int, run_seed: int, parent_dir: str, train_dataset,
         config=config,
         step=step,
         removed_dataset=removed_tuple,
+        val_datasets=all_val_datasets,
     )
 
-    print(f"[step {step}] run_seed={run_seed}: done. Saved to {run_dir}")
+    print(f"[step {step}] unlearning_seed={config.unlearning_seed}: done. Saved to {run_dir}")
 
 def main(config, *, config_path: str):
     method_name = getattr(config, 'unlearning_method', None).upper()
@@ -278,29 +281,34 @@ def main(config, *, config_path: str):
     data_path = os.path.join(config.data_root.strip(), dataset_name.strip())
     print(f"Loading dataset from {data_path}...")
 
+    val_split_seed = getattr(config, 'val_split_seed', 42)
+    test_split_seed = getattr(config, 'test_split_seed', 1019)
+
     if dataset_name == "EICU":
-        train_dataset, test_dataset, meta_info = get_dataset(
+        train_dataset, val_dataset, test_dataset, meta_info = get_dataset(
             dataset_name=dataset_name,
             data_root=data_path,
             device=config.device,
             task_type=config.task_type,
-            intersectional=True if config.protected_attr == "ethnicity_age" else False
+            val_split_seed=val_split_seed,
         )
     elif dataset_name == "MIMIC":
-        train_dataset, test_dataset, meta_info = get_dataset(
+        train_dataset, val_dataset, test_dataset, meta_info = get_dataset(
             dataset_name=dataset_name,
             data_root=data_path,
             device=config.device,
-            intersectional=True if config.protected_attr == "ethnicity_age" else False
+            val_split_seed=val_split_seed,
+            test_split_seed=test_split_seed,
         )
     elif dataset_name == "YOUR PRIVATE DATASET":
-        train_dataset, test_dataset, meta_info = get_dataset(
+        train_dataset, val_dataset, test_dataset, meta_info = get_dataset(
             dataset_name=dataset_name,
             data_root=data_path,
         )
     else:
         raise ValueError(f"Invalid dataset name: {dataset_name}")
 
+    all_val_datasets = {dataset_name: val_dataset}
     all_test_datasets = {dataset_name: test_dataset}
     if hasattr(config, 'extra_eval_datasets') and config.extra_eval_datasets:
         extra_list = [item.strip() for item in str(config.extra_eval_datasets).split(',') if item and item.strip().lower() != 'none']
@@ -308,13 +316,10 @@ def main(config, *, config_path: str):
             if this_ds not in all_test_datasets:
                 print(f"Loading extra evaluation dataset: {this_ds}...")
                 data_path_extra = os.path.join(config.data_root.strip(), this_ds.strip())
-                _, this_test_dataset, this_test_meta_info = get_dataset(
+                _, this_val_dataset, this_test_dataset, this_test_meta_info = get_dataset(
                     dataset_name=this_ds,
                     data_root=data_path_extra,
-                    device=config.device,
-                    normalise_data=False,
-                    intersectional=True if config.protected_attr == "ethnicity_age" else False,
-                    cal_dist=False
+                    device=config.device
                 )
                 this_test_meta_info.pop('scaler')
                 this_data = meta_info['scaler'].transform(this_test_dataset['test_input'].cpu().detach().numpy())
@@ -325,7 +330,7 @@ def main(config, *, config_path: str):
     step_remove_size, num_steps = compute_step_plan(total_samples, config)
     print(f"Planning: step_remove_size={step_remove_size}, num_steps={num_steps} (+ step_0)")
 
-    ensure_step0_origin(config, train_dataset, all_test_datasets, train_dataset['train_input'])
+    ensure_step0_origin(config, train_dataset, all_val_datasets, all_test_datasets, train_dataset['train_input'])
 
     if config.target_step == -1:
         steps_to_run = list(range(1, num_steps + 1))
@@ -346,30 +351,22 @@ def main(config, *, config_path: str):
             continue
 
         for pidx, parent_dir in enumerate(parent_dirs):
-            rng = random.Random(config.seed + step * 1000 + pidx * 100)
-            all_seeds: List[int] = []
-            while len(all_seeds) < config.num_runs:
-                new_seed = rng.randint(0, 1000000)
-                if new_seed not in all_seeds:
-                    all_seeds.append(new_seed)
-
-            for run_idx, run_seed in enumerate(all_seeds):
-                print(f"--- Step {step} | Parent {pidx+1}/{len(parent_dirs)} | Run {run_idx+1}/{config.num_runs} | seed={run_seed}")
-                try:
-                    run_single(
-                        config=config,
-                        step=step,
-                        run_seed=run_seed,
-                        parent_dir=parent_dir,
-                        train_dataset=train_dataset,
-                        all_test_datasets=all_test_datasets,
-                        step_remove_size=step_remove_size,
-                        method_key=getattr(config, 'unlearning_method', method_name),
-                    )
-                except Exception as e:
-                    print(f"Error: Step {step}, Parent {pidx+1}, Run {run_idx+1} failed: {e}")
-                    traceback.print_exc()
-                    continue
+            print(f"--- Step {step} | Parent {pidx+1}/{len(parent_dirs)} | unlearning_seed={config.unlearning_seed}")
+            try:
+                run_single(
+                    config=config,
+                    step=step,
+                    parent_dir=parent_dir,
+                    train_dataset=train_dataset,
+                    all_val_datasets=all_val_datasets,
+                    all_test_datasets=all_test_datasets,
+                    step_remove_size=step_remove_size,
+                    method_key=getattr(config, 'unlearning_method', method_name),
+                )
+            except Exception as e:
+                print(f"Error: Step {step}, Parent {pidx+1} failed: {e}")
+                traceback.print_exc()
+                continue
 
         print(f"=== Step {step} Completed ===")
 
@@ -378,7 +375,7 @@ def main(config, *, config_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default='configs/eICU.yaml')
+    parser.add_argument('--config_path', type=str, default='configs/example.yaml')
     args = parser.parse_args()
     config = load_config(args.config_path)
     main(config, config_path=args.config_path)

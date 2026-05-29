@@ -1,9 +1,9 @@
 # dataset
-dataset_name: "MIMIC"
+dataset_name: "EICU"
 data_root: "data"
 extra_eval_datasets: null
 protected_attr: "ethnicity"
-task_type: "mortality"
+task_type: "mortality"  # "mortality", "shock"
 
 # model
 model_name: "lstm"
@@ -14,24 +14,30 @@ lstm:
 
 # training for the original model
 seed: 512
+val_split_seed: 1025
 lr: 0.0005
 epochs: 30
-batch_size: 512
+batch_size: 256
 early_stop_patience: 10
 
 # unlearning method
 unlearning_method: "FU"
 
 # FU hyperparams
-unlearning_lr: 0.0005
-unlearning_iterations: 1
+unlearning_lr: 0.000005
+unlearning_epochs: 5
 weight_cls: 0.1
-weight_fair: 0.3
-weight_remain: 0.1
+weight_fair: 0.7
+weight_remain: 0.2
+
+# FU implementation variants
+fairness_loss_type: "pairwise_squared_diff"    # "pairwise_squared_diff", "group_mean_diff"
+gram_schmidt_type: "orthonormal_basis"         # "orthonormal_basis", "sequential_projection"
+normalize_forget_grad: false                   # false, true
 
 # unlearning
 exp_root: ""
-num_runs: 1
+unlearning_seed: 42
 target_step: -1  # -1 means run all steps
 sample_method: "random"
 remove_ratio: 0.1
@@ -45,12 +51,14 @@ eval_model_inversion: 1
 
 # mia hyperparameters
 mia_kwargs:
-    sample_test_size: 500
+    seed: 65
+    sample_test_size: null
 
 # model inversion hyperparameters
 model_inversion_kwargs:
+    seed: 65
     iters: 100
-    noise_std_range: [0.05, 0.1]
+    noise_std_range: [0.01, 0.1]
     l1_reg: 1e-3
     k: 10
     multi_restart: 1

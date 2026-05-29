@@ -1,9 +1,5 @@
 # Overview
-This repository implements **Fair Unlearning (FU)**, a framework for machine unlearning with fairness guarantees. It supports:
-- Multiple unlearning strategies with fairness constraints
-- Comprehensive evaluation: fairness metrics, membership inference attacks, and model inversion attacks
-- Pre-configured support for eICU and MIMIC-IV datasets
-- Easy extension to custom private datasets
+This repository implements **Fair Unlearning (FU)**, a framework for machine unlearning with fairness guarantees. 
 
 ---
 
@@ -16,7 +12,7 @@ bash build_env.sh  # or: pip install -r requirements.txt
 # See "Data Preparation" section for details
 
 # 3. Run with example config
-python main.py --config_path configs/MIMIC.yaml
+python main.py --config_path configs/example.yaml
 
 # 4. Check results
 # Output: snapshots_FU/<dataset>_<model>_<protected_attr>_<task_type>/
@@ -47,7 +43,7 @@ snapshots_FU/<dataset>_<model>_<protected_attr>_<task_type>/
 │   ├── origin_model.pt
 │   ├── remaining_indices.npy
 │   └── results/<dataset>_results_step0.json
-└── step_k/run_seed_<seed>/           # Unlearning step k
+└── step_k/seed_<unlearning_seed>/    # Unlearning step k
     ├── model.pth
     ├── removed_indices_stepk.npy
     ├── remaining_indices.npy
@@ -114,15 +110,17 @@ data/
 
 # Configuration Guide
 
-Configuration files are in `configs/` (e.g., `configs/MIMIC.yaml`).
+Configuration files are in `configs/` (`template.yaml` is the template; `example.yaml` is a runnable example).
 
-## Key Parameters
+**Note**: > **Note**: The values shown below are examples/defaults and should be adjusted based on your dataset. This repository also provides additional configuration options (e.g., gradient-orthogonalization method, fairness-loss variant) to facilitate experimentation, along with a learning-rate schedule that improves stability for cumulative unlearning.
+
+## Complete Parameter Reference
 
 ### Dataset & Task
 ```yaml
 dataset_name: MIMIC              # MIMIC | EICU | YOUR_PRIVATE_DATASET
 data_root: data                  # Data directory root
-protected_attr: ethnicity           # ethnicity | ethnicity_age (intersectional)
+protected_attr: ethnicity        # ethnicity | gender
 task_type: mortality             # Task name (EICU: mortality/shock)
 extra_eval_datasets: ""          # Optional: comma-separated extra eval datasets
 ```
@@ -130,51 +128,117 @@ extra_eval_datasets: ""          # Optional: comma-separated extra eval datasets
 ### Model Architecture
 ```yaml
 model_name: lstm                 # mlp | lstm | transformer
-lstm:                            # Model-specific hyperparameters
+device: cuda                     # cuda | cuda:0 | cuda:1 | cpu
+
+# MLP-specific (when model_name: mlp)
+mlp:
   hidden_dim: 128
-  num_layers: 2
-  # ... (see config files for full options)
+
+# LSTM-specific (when model_name: lstm)
+lstm:
+  hidden_dim: 256
+
+# Transformer-specific (when model_name: transformer)
+transformer:
+  dim: 64                        # Model dimension
+  depth: 2                       # Number of transformer layers
+  heads: 8                       # Number of attention heads
+  ff_dim: 256                    # Feed-forward dimension
+  dropout: 0.1                   # Dropout rate
 ```
 
-### Training
+### Training (Original Model)
 ```yaml
-seed: 42
-lr: 0.001
-epochs: 100
-batch_size: 64
-early_stop_patience: 10
+seed: 42                         # Random seed for training
+val_split_seed: 42               # Seed for train/val split
+lr: 0.001                        # Learning rate
+epochs: 100                      # Maximum training epochs
+batch_size: 64                   # Batch size
+early_stop_patience: 10          # Early stopping patience
 ```
 
-### Unlearning
+### Unlearning Method
 ```yaml
-unlearning_method: FU            # Fair Unlearning
-unlearning_lr: 0.0001
-unlearning_iterations: 5
-weight_cls: 0.1                  # Classification loss weight
-weight_fair: 0.5                 # Fairness loss weight
+unlearning_method: FU            # Fair Unlearning method
+
+# FU loss weights
+unlearning_lr: 0.0001            # Unlearning learning rate
+unlearning_epochs: 5             # Gradient update epochs per step
+weight_cls: 0.1                  # Forget gradient weight (unlearning strength)
+weight_fair: 0.5                 # Fairness gradient weight
 weight_remain: 0.3               # Remaining data utility weight
 ```
 
+### FU Implementation Variants
+
+These parameters control the algorithmic variants of Fair Unlearning. Each option has distinct characteristics suited for different scenarios.
+
+```yaml
+fairness_loss_type: pairwise_squared_diff
+gram_schmidt_type: orthonormal_basis
+normalize_forget_grad: false
+```
+
+**fairness_loss_type** - Fairness loss computation method:
+| Option | Characteristics | Use Case |
+|--------|-----------------|----------|
+| `pairwise_squared_diff` | Computes squared differences across all group pairs. Complexity grows quadratically with number of groups. | Fewer groups; strict balancing across all group pairs required. |
+| `group_mean_diff` | Computes deviation of each group from the global mean. Complexity grows linearly. | More groups; focus on deviation from overall average. |
+
+**gram_schmidt_type** - Gradient orthogonalization method:
+| Option | Characteristics | Use Case |
+|--------|-----------------|----------|
+| `orthonormal_basis` | Constructs a complete orthonormal basis, ensuring all gradient components are fully orthogonal. More computationally complete. | Strict gradient orthogonality guarantees required. |
+| `sequential_projection` | Projects gradients sequentially in order. More computationally lightweight. | High-dimensional gradients; relaxed orthogonality requirements. |
+
+**normalize_forget_grad** - Whether to normalize the forget gradient:
+| Option | Characteristics | Use Case |
+|--------|-----------------|----------|
+| `true` | Normalizes to unit length, removing magnitude influence and preserving only directional information. | Gradient magnitudes vary significantly across loss terms. |
+| `false` | Preserves original gradient magnitude. | Gradient magnitude carries meaningful information. |
+
 ### Forgetting Schedule
 ```yaml
-remove_ratio: 0.1                # Max forgetting ratio (e.g., 10%)
-step_ratio: 0.01                 # Increment per step (e.g., 1%)
-target_step: -1                  # -1: all steps | 0: only eval original | >0: specific step
-num_runs: 3                      # Repeated runs per step
-sample_method: random            # Sampling strategy (combine with target_protected_values for targeted)
+exp_root: ""                     # Output directory (default: snapshots_FU/)
+unlearning_seed: 100             # Seed for sampling removed data and randomness in unlearning
+target_step: -1                  # Which steps to run
+                                 #   - -1: run all steps
+                                 #   - 0: only train/eval original model (step_0)
+                                 #   - >0: run specific step only
+sample_method: random            # How to sample data for removal
+                                 #   - "random": uniform random sampling
+                                 #   - "majority": sample from majority group
+remove_ratio: 0.1                # Total removal ratio (e.g., 0.1 = 10% of training data)
+step_ratio: 0.01                 # Removal ratio per step (e.g., 0.01 = 1% per step)
+target_protected_values: null    # Target specific protected attribute values for removal (null = all)
 ```
 
 **Example**: `remove_ratio=0.1` + `step_ratio=0.01` → 10 forgetting steps (1%, 2%, ..., 10%) + original model (step_0)
 
 ### Evaluation
 ```yaml
-eval_fairness: 1                 # 0: off | 1: on
-eval_mia: 1                      # Membership Inference Attack
-eval_model_inversion: 1          # Model Inversion Attack
-mia_kwargs:                      # MIA-specific hyperparameters
-  # ... (see config for details)
-model_inversion_kwargs:          # Model inversion-specific hyperparameters
-  # ... (see config for details)
+eval_fairness: 1                 # Fairness metrics (0: off, 1: on)
+eval_mia: 1                      # Membership Inference Attack (0: off, 1: on)
+eval_model_inversion: 1          # Model Inversion Attack (0: off, 1: on)
+```
+
+### MIA Hyperparameters
+```yaml
+mia_kwargs:
+  seed: 1234                     # Random seed for MIA evaluation
+  sample_test_size: 500          # Number of test samples for MIA (null = same size for test data)
+```
+
+### Model Inversion Hyperparameters
+```yaml
+model_inversion_kwargs:
+  seed: 1234                     # Random seed for model inversion
+  iters: 100                     # Optimization iterations for reconstruction
+  noise_std_range: [0.01, 0.1]   # Range for initial noise standard deviation
+  l1_reg: 0.001                  # L1 regularization weight
+  k: 10                          # k for KNN distance computation
+  multi_restart: 1               # Number of random restarts
+  inv_per_class: 256             # Number of inversions per class
 ```
 
 ---
@@ -208,7 +272,19 @@ The `main.py` script orchestrates the following workflow:
    - **Fairness**: demographic parity, equalized odds, etc.
    - **MIA**: membership inference attack (AUROC)
    - **Model Inversion**: model inversion attack (KNN Distance)
-   - Results saved under `step_k/run_seed_xxx/results/`
+   - Results saved under `step_k/seed_<unlearning_seed>/results/`
+
+---
+
+# Baselines
+
+Most of the baseline methods compared in our experiments provide open-source implementations that can be used directly:
+
+| Method | Repository |
+|--------|------------|
+| **CR** (Certified Removal) | [facebookresearch/certified-removal](https://github.com/facebookresearch/certified-removal) |
+| **CF** (Catastrophic Forgetting) | [shash42/Evaluating-Inexact-Unlearning](https://github.com/shash42/Evaluating-Inexact-Unlearning) |
+| **SCRUB** | [meghdadk/SCRUB](https://github.com/meghdadk/SCRUB) |
 
 ---
 

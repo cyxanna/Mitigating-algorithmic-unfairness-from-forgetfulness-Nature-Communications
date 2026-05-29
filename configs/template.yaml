@@ -1,0 +1,65 @@
+# dataset
+dataset_name: DATASET_NAME
+data_root: YOUR_DATA_ROOT
+extra_eval_datasets: EXTRA_EVAL_DATASETS
+protected_attr: PROTECTED_ATTR
+task_type: TASK_TYPE # "mortality", "shock"
+
+# model
+model_name: MODEL_NAME # "lstm", "mlp"
+device: DEVICE
+
+lstm:
+  hidden_dim: HIDDEN_DIM
+
+# training for the original model
+seed: EXPERIMENT_SEED
+val_split_seed: VAL_SPLIT_SEED
+lr: LEARNING_RATE
+epochs: EPOCHS
+batch_size: BATCH_SIZE
+early_stop_patience: EARLY_STOP_PATIENCE
+
+# unlearning method
+unlearning_method: UNLEARNING_METHOD # "FU"
+
+# FU hyperparams
+unlearning_lr: UNLEARNING_LR
+unlearning_epochs: UNLEARNING_EPOCHS
+weight_cls: WEIGHT_UNLEARNING
+weight_fair: WEIGHT_FAIRNESS
+weight_remain: WEIGHT_REMAINING
+
+# FU implementation variants
+fairness_loss_type: FAIRNESS_LOSS_TYPE # "pairwise_squared_diff", "group_mean_diff"
+gram_schmidt_type: GRAM_SCHMIDT_TYPE # "orthonormal_basis", "sequential_projection"
+normalize_forget_grad: NORMALIZE_FORGET_GRAD # false, true
+
+# unlearning
+exp_root: ""
+unlearning_seed: UNLEARNING_SEED # controls random sampling of removed data and model initialization
+target_step: TARGET_STEP # -1 means run all steps, TARGET_STEP means run up to that step
+sample_method: UNLEARNING_SAMPLE_METHOD # "random", "majority"
+remove_ratio: UNLEARNING_REMOVE_RATIO
+step_ratio: UNLEARNING_STEP_RATIO
+target_protected_values: TARGET_PROTECTED_VALUES
+
+# evaluation
+eval_fairness: EVAL_FAIRNESS # 1, 0
+eval_mia: EVAL_MIA # 1, 0
+eval_model_inversion: EVAL_MODEL_INVERSION # 1, 0
+
+# mia hyperparameters
+mia_kwargs:
+    seed: MIA_SEED
+    sample_test_size: MIA_SAMPLE_TEST_SIZE
+
+# model inversion hyperparameters
+model_inversion_kwargs:
+    seed: MI_SEED
+    iters: MODEL_INVERSION_ITERS
+    noise_std_range: NOISE_STD_RANGE
+    l1_reg: WEIGHT_L1_REG
+    k: NUMBER_OF_NEIGHBORS
+    multi_restart: MULTI_RESTART
+    inv_per_class: INV_PER_CLASS
